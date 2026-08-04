@@ -1,0 +1,47 @@
+name: sync-neko-board
+
+on:
+  schedule:
+    # GitHub Actions cron 是 UTC; 两条合起来 = 北京 07:00-22:50
+    - cron: '*/10 23 * * *'      # 北京 07:00-07:59 (UTC 23:00-23:59, 前一日)
+    - cron: '*/10 0-14 * * *'    # 北京 08:00-22:50 (UTC 00:00-14:50)
+  workflow_dispatch:             # 手动触发兜底 (Actions 偶发跳过时一键恢复)
+
+permissions:
+  contents: write                # GITHUB_TOKEN 提交权限
+
+concurrency:
+  group: sync-neko-board
+  cancel-in-progress: false      # 绝不中断写文件轮 (防半写状态)
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 生成数据快照
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          WEATHER_API_KEY: ${{ secrets.WEATHER_API_KEY }}
+          WEATHER_LAT: '31.62'        # 崇明城桥镇 (与旧 .env 一致)
+          WEATHER_LON: '121.39'
+        run: python3 sync.py
+
+      - name: 提交并推送
+        if: success()
+        run: |
+          git config user.name 'board-data-sync'
+          git config user.email 'board-data-sync@users.noreply.github.com'
+          # reminders.json 由 AstrBot 插件写入, 只读不写 (避免与插件 PUT 竞争)
+          git add data.json tick.txt state.json tick_history.json
+          git commit -m "snapshot $(TZ=Asia/Shanghai date +%F_%H:%M)" || echo 'no change'
+          git push
+
+      - name: jsDelivr CDN 刷新
+        if: success()
+        continue-on-error: true   # purge 失败仅告警 (jsDelivr 分支缓存 ~24h, raw 兜底始终新鲜)
+        run: |
+          curl -sf -X POST https://purge.jsdelivr.net \
+            -H 'content-type: application/json' \
+            -d '{"path":["/gh/P617p/board-data@main/data.json","/gh/P617p/board-data@main/tick.txt"]}'
