@@ -73,25 +73,42 @@ WORK_REMIND_COOLDOWN_MIN = 30   # 喝水提醒冷却 (分钟)
 BOARD_WINDOW_SEC = 30 * 60
 BOARD_MAX_ITEMS = 20            # reminders.json 环形条数
 
-# 问候语池 (纯文字, 无 emoji; 前缀 "Neko：" 由板子端添加)
+# 问候语池 (纯文字, 无 emoji, 全部 GB2312 内字符 — 板子字体只覆盖 GB2312;
+# 前缀 "Neko：" 由板子端添加)
 STOCK_GREETINGS = [
     '主人，该看看股票了喵~',
     '开盘啦开盘啦！今天会涨吗？',
     '盯盘要紧，但别忘了喝水哦主人！',
     '主人专心工作，我帮你盯着盘！',
 ]
-GREETINGS = [
-    '主人早上好！今天也要元气满满哦！(ฅ´ω`ฅ)',
-    '今天天气不错呢！',
-    '加油搬砖！为了更好的明天！',
-    '辛苦一天啦！好好休息喵～',
-    '今天也要做个开心的打工人！',
-    '主人有什么吩咐？',
-    '工作再忙也要记得摸摸鱼哦~',
-    '收工啦！主人今天也辛苦了！',
-    '晚安喵~ 祝主人好梦',
-    '今天想吃什么好吃的？',
-] + STOCK_GREETINGS
+
+# 按时间段分桶, 桶内随机 — 避免"傍晚说早上好"式时间语义错乱
+# (分钟 = hour*60 + minute; 与 SCHEDULES 窗口互补, 覆盖 SCHEDULES 外的空档)
+GREETING_BUCKETS = [
+    # (起始分钟, 结束分钟, 文案列表)
+    (8 * 60, 11 * 60, [
+        '主人早上好！今天也要元气满满哦！',
+        '早晨好呀，新的一天要开心哦～',
+        '主人吃早饭了吗？记得按时吃饭！',
+    ]),
+    (11 * 60, 17 * 60, [
+        '今天天气不错呢！',
+        '加油搬砖！为了更好的明天！',
+        '今天也要做个开心的打工人！',
+        '主人有什么吩咐？',
+        '工作再忙也要记得摸摸鱼哦~',
+        '今天想吃什么好吃的？',
+    ]),
+    (17 * 60, 21 * 60, [
+        '辛苦一天啦！好好休息喵～',
+        '收工啦！主人今天也辛苦了！',
+        '忙了一天，放松一下犒劳自己吧～',
+    ]),
+    (21 * 60, 24 * 60, [
+        '晚安喵~ 祝主人好梦',
+        '夜深啦，主人早点休息哦～',
+    ]),
+]
 
 # 新闻: 板子 124×56px, 12px 字行高 14 → 4 行 ≈ 40 字 (含标点)
 NEWS_MAX_CHARS = 40
@@ -322,6 +339,22 @@ def today_reminders():
     return out
 
 
+def pick_greeting():
+    """按时段分桶随机问候 (股票问候仅交易时段混入; 超窗兜底夜间桶)"""
+    now = now_cn()
+    t = now.hour * 60 + now.minute
+    pool = None
+    for start, end, texts in GREETING_BUCKETS:
+        if start <= t < end:
+            pool = list(texts)
+            break
+    if pool is None:
+        pool = list(GREETING_BUCKETS[-1][2])
+    if now.weekday() < 5 and 9 * 60 + 15 <= t <= 15 * 60 + 5:
+        pool += STOCK_GREETINGS
+    return strip_emoji(random.choice(pool))
+
+
 def pick_message():
     """当前应显示的消息: 看板提醒窗口 > 时段消息 > 工作时间随机 > 问候池"""
     now = now_cn()
@@ -349,12 +382,8 @@ def pick_message():
             save_state(st)
             return random.choice(WORK_REMINDERS)
 
-    # 4. 问候池兜底 (股票相关问候仅交易时段出现, 休市不提醒看盘)
-    if now.weekday() < 5 and 9 * 60 + 15 <= t <= 15 * 60 + 5:
-        pool = GREETINGS
-    else:
-        pool = [g for g in GREETINGS if g not in STOCK_GREETINGS]
-    return strip_emoji(random.choice(pool))
+    # 4. 问候池兜底 (按时段分桶, 股票问候仅交易时段混入; 休市不提醒看盘)
+    return pick_greeting()
 
 
 # ============================================================
@@ -540,7 +569,7 @@ def main():
         'calendar': {'year': now.year, 'month': now.month, 'day': now.day,
                      'hour': now.hour, 'minute': now.minute, 'second': now.second,
                      'weekday': now.isoweekday() % 7},
-        'greeting': strip_emoji(random.choice(GREETINGS)),
+        'greeting': pick_greeting(),
         'message': message,
         'reminders': reminders,
         'news': news,
