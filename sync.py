@@ -122,6 +122,36 @@ TICK_TENCENT_URL = ('https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=' 
 TICK_PARTIAL_STALE_SEC = 600    # 盘中 partial 超 10 分钟陈旧则补拉 (匹配 Actions 节奏)
 TICK_MAX_ENTRIES = 5            # 缓存最多 5 个自然日 (≥3 个交易日)
 
+# ============================================================
+# K线策略提醒 (2026-08-05 新增)
+#   信号: 金叉/死叉(MA5×MA20, 放量确认) / MACD金叉死叉 / 布林突破 /
+#         放量异动 / 日线大波动 / 主力净流入
+#   时机: 放量/大波动/资金流盘中实时, 均线类收盘后确认 (防盘中假信号)
+#   防重复: state.json strat {date, fired, count, key, ts, text}
+#           同一信号同日只提醒一次, 单日上限 STRAT_MAX_PER_DAY 条
+# ============================================================
+STRATEGY_KLINE_URL = ('https://money.finance.sina.com.cn/quotes_service/api/'
+                      'json_v2.php/CN_MarketData.getKLineData')
+STRATEGY_KLINE_DAYS = 120        # MACD EMA26 预热需 60+ 根
+STRATEGY_KLINE_SYMBOL = TICK_STOCK_CODE   # 与分时同股票
+
+
+def eastmoney_secid():
+    c = TICK_STOCK_CODE.lower()
+    return ('1' if c.startswith('sh') else '0') + '.' + c[2:]
+
+
+MONEYFLOW_URL = ('http://push2.eastmoney.com/api/qt/stock/fflow/kline/get?'
+                 'lmt=1&klt=101&secid=%s&fields1=f1,f2,f3,f7'
+                 '&fields2=f51,f52,f53,f54,f55,f56' % eastmoney_secid())
+
+STRAT_BIG_CHG_PCT = 5.0          # 日线大波动阈值 %
+STRAT_VOL_MULT = 1.8             # 放量: 预计全天量 / 5日均量
+STRAT_GOLD_VOL_MULT = 1.3        # 金叉组合确认: 放量倍数 (降震荡市假信号)
+STRAT_MONEYFLOW_YUAN = 20000000  # 主力净流入阈值 元 (2000万)
+STRAT_ALERT_MINUTES = 60         # 提醒窗口: 触发后 message 优先显示分钟
+STRAT_MAX_PER_DAY = 5            # 单日提醒上限
+
 ctx = ssl.create_default_context()
 
 
@@ -339,6 +369,170 @@ def today_reminders():
     return out
 
 
+def fetch_kline():
+    """新浪日线 (datalen=120, 供 MACD/BOLL 预热); 失败返回 None"""
+    url = (STRATEGY_KLINE_URL + '?symbol=%s&scale=240&ma=no&datalen=%d'
+           % (STRATEGY_KLINE_SYMBOL, STRATEGY_KLINE_DAYS))
+    resp = http_get(url, timeout=8)
+    if not resp:
+        return None
+    try:
+        arr = json.loads(resp)
+        out = []
+        for d in arr:
+            if not d.get('close'):
+                continue
+            out.append({'date': str(d.get('day', ''))[:10], 'open': float(d.get('open', 0)),
+                        'high': float(d.get('high', 0)), 'low': float(d.get('low', 0)),
+                        'close': float(d.get('close', 0)), 'volume': float(d.get('volume', 0))})
+        return out or None
+    except Exception:
+        return None
+
+
+def fetch_moneyflow():
+    """东方财富个股资金流 (klt=101 日线, 最新一根): 主力净流入(元)=大单+超大单; 失败 None"""
+    try:
+        resp = http_get(MONEYFLOW_URL, timeout=8)
+        data = json.loads(resp or '{}')
+        klines = (data.get('data') or {}).get('klines') or []
+        if not klines:
+            return None
+        parts = klines[-1].split(',')
+        if len(parts) < 6:
+            return None
+        return float(parts[1])   # f52 = 主力净流入 (元)
+    except Exception:
+        return None
+
+
+def ema_series(values, n):
+    k = 2.0 / (n + 1)
+    out, e = [], None
+    for v in values:
+        e = v if e is None else v * k + e * (1 - k)
+        out.append(e)
+    return out
+
+
+def traded_progress(t):
+    """当前交易时刻进度 (0-1): 上午 0-120 分钟 / 午休 120 / 下午 121-241"""
+    if t <= 9 * 60 + 30:
+        return 0.0
+    if t <= 11 * 60 + 30:
+        return (t - (9 * 60 + 30)) / 242.0
+    if t < 13 * 60:
+        return 120 / 242.0
+    return (120 + (t - 13 * 60)) / 242.0
+
+
+def check_strategies(kl, mf, now):
+    """按当前时刻检查当日信号 (盘后=完整K线均线类, 盘中=量/价/资金实时类)
+    返回 [{key, text}] 已按优先级排序; 非交易日/盘前返回 []"""
+    t = now.hour * 60 + now.minute
+    if now.weekday() >= 5 or t < 9 * 60 + 30:
+        return []
+    n = len(kl)
+    if n < 2:
+        return []
+    is_after_close = t >= 15 * 60 + 5
+    last, prev = kl[-1], kl[-2]
+    signals = []
+    closes = [x['close'] for x in kl]
+    vols = [x['volume'] for x in kl]
+    vol5 = sum(vols[-6:-1]) / 5.0 if n >= 6 else (sum(vols) / n if vols else 0)
+
+    # --- 收盘后确认 (需完整日K, 防盘中假信号) — 均线类重要信号优先 ---
+    if is_after_close and n >= 21:
+        ma5 = sum(closes[-5:]) / 5.0
+        ma20 = sum(closes[-20:]) / 20.0
+        ma5_prev = sum(closes[-6:-1]) / 5.0
+        ma20_prev = sum(closes[-21:-1]) / 20.0
+        # 金叉/死叉 (MA5×MA20; 金叉要求放量确认 — 组合降假信号)
+        gold_vol = vols[-1] >= vol5 * STRAT_GOLD_VOL_MULT
+        if ma5_prev <= ma20_prev and ma5 > ma20:
+            if gold_vol:
+                signals.append({'key': 'gold', 'text': '真爱美家 放量金叉！MA5上穿MA20'})
+        elif ma5_prev >= ma20_prev and ma5 < ma20:
+            signals.append({'key': 'death', 'text': '真爱美家 死叉！MA5下穿MA20'})
+        # MACD 金叉/死叉 (12/26/9)
+        dif = ema_series(closes, 12)
+        dea = ema_series(dif, 9)
+        if dif[-2] <= dea[-2] and dif[-1] > dea[-1]:
+            signals.append({'key': 'macdg', 'text': '真爱美家 MACD金叉！多方动能增强'})
+        elif dif[-2] >= dea[-2] and dif[-1] < dea[-1]:
+            signals.append({'key': 'macdd', 'text': '真爱美家 MACD死叉，注意回调'})
+        # 布林带突破 (20日 ±2σ)
+        mid = ma20
+        std = (sum((c - mid) ** 2 for c in closes[-20:]) / 20.0) ** 0.5
+        if last['close'] >= mid + 2 * std:
+            signals.append({'key': 'bollu', 'text': '真爱美家 突破布林上轨！'})
+        elif last['close'] <= mid - 2 * std:
+            signals.append({'key': 'bolld', 'text': '真爱美家 跌破布林下轨，注意风险'})
+
+    # --- 盘中实时 (混合时机: 价/量/资金即时) ---
+    # 日线大波动 (当日涨跌幅)
+    if prev['close'] > 0:
+        chg = (last['close'] - prev['close']) / prev['close'] * 100
+        if abs(chg) >= STRAT_BIG_CHG_PCT:
+            signals.append({'key': 'bigchg',
+                            'text': '真爱美家 今日%s %.1f%%' % ('大涨' if chg > 0 else '大跌', chg)})
+    # 放量异动: 盘后直接用实际量比, 盘中按时间折算预计全天量 (早盘放量也能报)
+    if vol5 > 0 and (is_after_close or traded_progress(t) > 0.1):
+        if is_after_close:
+            est_vol = last['volume']
+        else:
+            est_vol = last['volume'] / traded_progress(t)
+        if est_vol >= vol5 * STRAT_VOL_MULT:
+            signals.append({'key': 'vol',
+                            'text': '真爱美家 放量异动！量比%.1f' % (est_vol / vol5)})
+    # 主力资金流 (东财实时)
+    if mf is not None and mf >= STRAT_MONEYFLOW_YUAN:
+        signals.append({'key': 'money',
+                        'text': '真爱美家 主力净流入 %+.0f万' % (mf / 10000.0)})
+    return signals
+
+
+def update_strategy(kline, mf):
+    """当日信号去重 + 写 state.json strat; 返回当前待显示提醒 {text} 或 None
+    盘前/非交易日不更新 (防把昨日信号记到今日, 误挡今日真信号)"""
+    now = now_cn()
+    t = now.hour * 60 + now.minute
+    if not kline or now.weekday() >= 5 or t < 9 * 60 + 30:
+        return None
+    today = now.strftime('%Y-%m-%d')
+    st = load_state()
+    strat = st.get('strat') or {}
+    if strat.get('date') != today:
+        strat = {'date': today, 'fired': [], 'count': 0}
+    # 单日上限: 已满不再收新信号
+    if strat['count'] >= STRAT_MAX_PER_DAY:
+        # 窗口内仍显示当前提醒
+        if strat.get('text') and int(time.time()) - strat.get('ts', 0) <= STRAT_ALERT_MINUTES * 60:
+            return {'text': strat['text']}
+        return None
+    fired = set(strat.get('fired', []))
+    for sig in check_strategies(kline, mf, now):
+        if sig['key'] in fired:
+            continue
+        fired.add(sig['key'])
+        strat['fired'] = sorted(fired)
+        strat['count'] = strat.get('count', 0) + 1
+        strat['key'] = sig['key']
+        strat['text'] = sig['text']
+        strat['ts'] = int(time.time())
+        st['strat'] = strat
+        save_state(st)
+        print('[strategy] %s -> %s' % (now.strftime('%F %T'), sig['text']))
+        return {'text': sig['text']}
+    st['strat'] = strat
+    save_state(st)
+    # 已全部触发: 窗口内继续显示最后一条
+    if strat.get('text') and int(time.time()) - strat.get('ts', 0) <= STRAT_ALERT_MINUTES * 60:
+        return {'text': strat['text']}
+    return None
+
+
 def pick_greeting():
     """按时段分桶随机问候 (股票问候仅交易时段混入; 超窗兜底夜间桶)"""
     now = now_cn()
@@ -365,6 +559,12 @@ def pick_message():
         it_ts = it.get('ts', 0)
         if it_ts and same_local_day(it_ts, now) and 0 <= now_ts - it_ts <= BOARD_WINDOW_SEC:
             return it['text']
+
+    # 1.5 策略提醒 (K线信号触发后 STRAT_ALERT_MINUTES 分钟内优先显示)
+    strat = load_state().get('strat') or {}
+    if (strat.get('date') == now.strftime('%Y-%m-%d') and strat.get('text')
+            and now_ts - strat.get('ts', 0) <= STRAT_ALERT_MINUTES * 60):
+        return strat['text']
 
     t = now.hour * 60 + now.minute
 
@@ -557,6 +757,9 @@ def main():
     deepseek = fetch_deepseek(old.get('deepseek') or {})
     weather = fetch_weather(old.get('weather') or {})
     news = fetch_news(old.get('news') or '')
+    kline = fetch_kline()
+    mf = fetch_moneyflow()
+    update_strategy(kline, mf)   # 写 state.json strat; message 由 pick_message 读取
     message = pick_message()
     reminders = today_reminders()
 
