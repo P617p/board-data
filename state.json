@@ -1,1 +1,1 @@
-{"day_start_balance": 79.73, "date": "2026-08-06", "last_balance": 77.87, "strat": {"date": "2026-08-06", "fired": ["bigchg"], "count": 1, "key": "bigchg", "text": "真爱美家 今日大涨 7.3%", "ts": 1785980916}}
+{"day_start_balance": 79.73, "date": "2026-08-06", "last_balance": 77.41, "strat": {"date": "2026-08-06", "fired": ["bigchg", "vol"], "count": 2, "key": "vol", "text": "真爱美家 放量异动！量比2.0", "ts": 1785991785}}
