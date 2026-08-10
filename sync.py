@@ -69,8 +69,9 @@ WORK_REMINDERS = ['喝口水休息一下吧！', '站起来走两步，活动活
                   '记得喝水哦，别坐太久～', '起来伸个懒腰，放松一下！']
 WORK_REMIND_COOLDOWN_MIN = 30   # 喝水提醒冷却 (分钟)
 
-# 看板计划提醒窗口: 触发后 30 分钟内板子优先显示 (配合板子端 RTC 准点匹配)
-BOARD_WINDOW_SEC = 30 * 60
+# 看板计划提醒窗口: 板子 RTC 准点为主路径 (插件注册即写, 数据提前到板),
+# message 为近程提醒兜底 — 放宽到 3h 匹配 Actions 免费 cron 实际节流 (1.5~3h 一轮)
+BOARD_WINDOW_SEC = 3 * 3600
 BOARD_MAX_ITEMS = 20            # reminders.json 环形条数
 
 # 问候语池 (纯文字, 无 emoji, 全部 GB2312 内字符 — 板子字体只覆盖 GB2312;
@@ -357,15 +358,23 @@ def same_local_day(ts, now):
 
 
 def today_reminders():
-    """当天看板计划提醒清单 [{t:'HH:MM', text}] — 板子端 RTC 准点匹配用"""
+    """当天看板计划提醒清单 [{t:'HH:MM', text}] — 板子端 RTC 准点匹配用
+    (插件注册即写 + 触发时写会双写同条目, 按 (t,text) 去重; 勿用 ts 去重 —
+     同一分钟两个不同提醒会被误删)"""
     now = now_cn()
     out = []
+    seen = set()
     for it in get_board_messages():
         if len(out) >= 8:
             break
         if same_local_day(it.get('ts', 0), now):
             dt = datetime.fromtimestamp(it['ts'], TZ)
-            out.append({'t': '%02d:%02d' % (dt.hour, dt.minute), 'text': it['text']})
+            t = '%02d:%02d' % (dt.hour, dt.minute)
+            key = (t, it.get('text', ''))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({'t': t, 'text': it['text']})
     return out
 
 
