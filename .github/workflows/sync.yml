@@ -38,7 +38,8 @@ jobs:
           git config user.name 'board-data-sync'
           git config user.email 'board-data-sync@users.noreply.github.com'
           # reminders.json 由 AstrBot 插件写入, 只读不写 (避免与插件 PUT 竞争)
-          git add data.json tick.txt state.json tick_history.json
+          # tick_*.txt 为 R5 多股票分时 (主股票 tick.txt + 附加股票 tick_<code>.txt)
+          git add data.json tick.txt tick_*.txt state.json tick_history.json
           git commit -m "snapshot $(TZ=Asia/Shanghai date +%F_%H:%M)" || echo 'no change'
           git push
 
@@ -48,4 +49,5 @@ jobs:
         run: |
           curl -sf -X POST https://purge.jsdelivr.net \
             -H 'content-type: application/json' \
-            -d '{"path":["/gh/P617p/board-data@main/data.json","/gh/P617p/board-data@main/tick.txt"]}'
+            -d '{"path":["/gh/P617p/board-data@main/data.json","/gh/P617p/board-data@main/tick.txt",\
+                 "/gh/P617p/board-data@main/tick_sz000001.txt","/gh/P617p/board-data@main/tick_sh600519.txt"]}'

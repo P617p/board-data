@@ -23,6 +23,7 @@ import re
 import ssl
 import sys
 import time
+import uuid
 from datetime import datetime
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
@@ -112,16 +113,30 @@ GREETING_BUCKETS = [
 ]
 
 # 新闻: 板子 124×56px, 12px 字行高 14 → 4 行 ≈ 40 字 (含标点)
+# 2026-08-13 第二轮: 主源改东财 7x24 快讯 (证券类), 新浪证券频道 (lid=2517) 兜底
 NEWS_MAX_CHARS = 40
 NEWS_MIN_CHARS = 10
 NEWS_BAD_SUFFIX = ('背后', '内幕', '揭秘', '之谜', '真相', '始末', '风云', '大戏', '玄机')
-NEWS_URL = 'https://feed.mix.sina.com.cn/api/roll/get?pageid=153&lid=2516&num=50'
+# fastColumn=101: 证券/股市专属快讯 (102 为综合快讯, 会混入非证券内容)
+NEWS_URL = ('https://np-listapi.eastmoney.com/comm/web/getFastNewsList?'
+            'client=web&biz=web_724&fastColumn=101&sortEnd=&pageSize=50&req_trace=%s')
+NEWS_HEADERS = {'Referer': 'https://kuaixun.eastmoney.com/'}
+NEWS_FALLBACK_URL = 'https://feed.mix.sina.com.cn/api/roll/get?pageid=153&lid=2517&num=50'
 
-# 分时: 与板子 config.h STOCK_CODE 必须一致
-TICK_STOCK_CODE = 'sz003041'
-TICK_TENCENT_URL = ('https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=' + TICK_STOCK_CODE)
+# 分时: 主股票与板子 config.h STOCK_LIST[0] 必须一致; 附加股票生成 tick_<code>.txt
+TICK_STOCK_CODE = 'sz003041'   # 主股票 (tick.txt 契约不变)
+EXTRA_TICK_CODES = ['sz000001', 'sh600519']   # 附加股票 (与板端 STOCK_LIST 占位一致)
+TICK_CODES = [TICK_STOCK_CODE] + EXTRA_TICK_CODES
+TICK_TENCENT_URL_FMT = 'https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=%s'
 TICK_PARTIAL_STALE_SEC = 600    # 盘中 partial 超 10 分钟陈旧则补拉 (匹配 Actions 节奏)
 TICK_MAX_ENTRIES = 5            # 缓存最多 5 个自然日 (≥3 个交易日)
+
+# 国际指数 (R6): 东财 push2delay 批量 (f2/f3/f4 均 ×100, 休市返回 "-"); 黄金走新浪 GBK
+# ⚠️ push2.eastmoney.com 主域名易限流, 必须用 push2delay 延迟节点
+INDICES_URL = ('https://push2delay.eastmoney.com/api/qt/ulist.np/get?'
+               'secids=100.NDX,100.N225,100.KS11&fields=f2,f3,f12,f14')
+INDICES_MAP = {'NDX': '纳指', 'N225': '日经', 'KS11': '韩综'}   # 覆盖东财全名 (防超宽)
+GOLD_URL = 'https://hq.sinajs.cn/list=hf_XAU'   # 新浪黄金现货 (字段[0]=现价 [1]=昨收, GBK)
 
 # ============================================================
 # K线策略提醒 (2026-08-05 新增)
@@ -160,14 +175,14 @@ def now_cn():
     return datetime.now(TZ)
 
 
-def http_get(url, headers=None, timeout=10):
+def http_get(url, headers=None, timeout=10, encoding='utf-8'):
     req = Request(url)
     if headers:
         for k, v in headers.items():
             req.add_header(k, v)
     try:
         with urlopen(req, timeout=timeout, context=ctx) as r:
-            return r.read().decode('utf-8')
+            return r.read().decode(encoding)
     except Exception:
         return None
 
@@ -599,22 +614,90 @@ def pick_message():
 # 头条新闻 (新浪滚动, 清洗链 + 质量过滤)
 # ============================================================
 
+def pick_valid_title(items, old):
+    """清洗链 + 质量过滤, 取第一条有效标题 (失败返回旧值兜底)"""
+    for it in items:
+        t = clean_news_title(it.get('title') or '')
+        if not t:
+            continue
+        if len(t) < NEWS_MIN_CHARS:
+            continue
+        if t.endswith(NEWS_BAD_SUFFIX):
+            continue
+        return t
+    return old.get('news') or ''
+
+
 def fetch_news(old):
+    """头条新闻: 东财 7x24 快讯 (证券类) → 新浪证券频道兜底 → 旧值"""
+    # 1. 东财 7x24 快讯 (req_trace 随机, 实测任意串均可)
     try:
-        data = json.loads(http_get(NEWS_URL, timeout=8) or '{}')
-        items = (data.get('result') or {}).get('data') or []
-        for it in items:
-            t = clean_news_title(it.get('title') or '')
-            if not t:
-                continue
-            if len(t) < NEWS_MIN_CHARS:
-                continue
-            if t.endswith(NEWS_BAD_SUFFIX):
-                continue
-            return t
-        return old.get('news') or ''
+        resp = http_get(NEWS_URL % uuid.uuid4().hex, NEWS_HEADERS, timeout=8)
+        data = json.loads(resp or '{}')
+        items = ((data.get('data') or {}).get('fastNewsList')) or []
+        if items:
+            return pick_valid_title(items, old)
     except Exception:
-        return old.get('news') or ''
+        pass
+    # 2. 新浪证券频道 (结构与原 lid=2516 同构, 零风险)
+    try:
+        data = json.loads(http_get(NEWS_FALLBACK_URL, timeout=8) or '{}')
+        items = (data.get('result') or {}).get('data') or []
+        if items:
+            return pick_valid_title(items, old)
+    except Exception:
+        pass
+    return old.get('news') or ''
+
+
+# ============================================================
+# 国际指数 (R6): 纳指/日经/KOSPI (东财, ÷100) + 黄金 (新浪 GBK)
+# ============================================================
+
+def fetch_indices(old):
+    """返回 [{code,name,price,change_percent}] ≤4 项; 单项失败用旧快照对应项兜底
+    东财 f2/f3 ×100 需 ÷100; 休市可能返回 "-" (字符串) 需容错"""
+    indices = []
+    try:
+        resp = http_get(INDICES_URL, timeout=8)
+        data = json.loads(resp or '{}')
+        diff = (data.get('data') or {}).get('diff') or []
+        for it in diff:
+            code = it.get('f12') or ''
+            name = INDICES_MAP.get(code, it.get('f14') or '')
+            try:
+                price = float(it.get('f2')) / 100.0
+                chg = float(it.get('f3')) / 100.0
+            except (TypeError, ValueError):
+                price, chg = None, None
+            if price and price > 0:
+                indices.append({'code': code, 'name': name,
+                                'price': round(price, 2),
+                                'change_percent': round(chg, 2) if chg is not None else None})
+    except Exception:
+        pass
+    # 黄金 (新浪 hf_XAU, GBK 编码): [0]=现价 [1]=昨收 → 涨跌幅自算
+    try:
+        resp = http_get(GOLD_URL, {'Referer': 'https://finance.sina.com.cn'},
+                        timeout=8, encoding='gbk')
+        m = re.search(r'"([^"]*)"', resp or '')
+        if m:
+            fields = m.group(1).split(',')
+            if len(fields) >= 2:
+                price = float(fields[0])
+                prev = float(fields[1])
+                if price > 0 and prev > 0:
+                    indices.append({'code': 'XAU', 'name': '黄金', 'price': round(price, 2),
+                                    'change_percent': round((price - prev) / prev * 100.0, 2)})
+    except Exception:
+        pass
+    # 旧快照兜底: 本次缺失的 code 用旧值补位 (保持 4 项稳定)
+    if old.get('indices'):
+        have = {i['code'] for i in indices}
+        for oi in old['indices']:
+            if oi.get('code') not in have:
+                indices.append(oi)
+    return indices
 
 
 # ============================================================
@@ -623,29 +706,39 @@ def fetch_news(old):
 # 数据日期必须取响应 qt[30] (周末/节假日腾讯回上一交易日, 勿用本机日期)
 # ============================================================
 
-def load_tick_history():
+def load_tick_history_all():
+    """读全部分时缓存 {code: entries}; 兼容旧单键格式 {"entries": [...]} (迁移为主股票)"""
     try:
         with open(TICK_HISTORY_FILE, encoding='utf-8') as f:
-            return json.load(f).get('entries', [])
+            data = json.load(f)
     except Exception:
-        return []
+        return {}
+    if isinstance(data, dict) and 'entries' in data and TICK_STOCK_CODE not in data:
+        return {TICK_STOCK_CODE: data['entries']}   # 旧格式迁移
+    out = {}
+    for code, val in (data or {}).items():
+        if isinstance(val, dict):
+            out[code] = val.get('entries', [])
+        elif isinstance(val, list):
+            out[code] = val
+    return out
 
 
-def save_tick_history(entries):
+def save_tick_history_all(store):
     try:
-        atomic_write(TICK_HISTORY_FILE, json.dumps({'entries': entries}, ensure_ascii=False))
+        atomic_write(TICK_HISTORY_FILE, json.dumps(store, ensure_ascii=False))
     except Exception:
         pass
 
 
-def fetch_tencent_day():
-    """拉腾讯分时 (当前时刻最近交易日), 过滤非交易时段点, 失败返回 None"""
+def fetch_tencent_day(code):
+    """拉腾讯分时 (当前时刻最近交易日, 任意代码通用), 过滤非交易时段点, 失败返回 None"""
     try:
-        resp = http_get(TICK_TENCENT_URL)
+        resp = http_get(TICK_TENCENT_URL_FMT % code)
         if not resp:
             return None
         data = json.loads(resp)
-        code_data = (data.get('data') or {}).get(TICK_STOCK_CODE) or {}
+        code_data = (data.get('data') or {}).get(code) or {}
         pts = ((code_data.get('data') or {}).get('data')) or []
         points = []
         for s in pts:
@@ -661,7 +754,7 @@ def fetch_tencent_day():
                 points.append([hhmm, price, vol])
         if not points:
             return None
-        qt = (code_data.get('qt') or {}).get(TICK_STOCK_CODE) or []
+        qt = (code_data.get('qt') or {}).get(code) or []
         try:
             prev_close = float(qt[3]) if len(qt) > 3 and qt[3] else None
         except Exception:
@@ -694,51 +787,61 @@ def upsert_tick_entry(entries, entry):
     entries.sort(key=lambda e: e['date'])
 
 
-def tick_refresh_once():
-    """单轮分时更新决策 (原 daemon 死循环摊平成一次运行; cron 已限定北京 7:00-22:50)"""
-    entries = load_tick_history()
+def tick_refresh_once_for(code, entries):
+    """单只股票单轮分时更新决策 (返回更新后的 entries 列表)
+    (原 daemon 死循环摊平成一次运行; cron 已限定北京 7:00-22:50)"""
     now = now_cn()
     t = now.hour * 60 + now.minute
     is_weekday = now.weekday() < 5
 
     # 首次/缓存被清: 回填一次 (完整度由时刻决定)
     if not entries:
-        d = fetch_tencent_day()
+        d = fetch_tencent_day(code)
         if d:
             d['complete'] = (t >= 15 * 60 + 5)
-            save_tick_history([d])
-        return
+            return [d]
+        return []
 
-    # 周末或时段外: 不调腾讯 (tick.txt 沿用缓存)
+    # 周末或时段外: 不调腾讯 (tick 文件沿用缓存)
     if not is_weekday or t >= 23 * 60 or t < 7 * 60:
-        return
+        return entries
 
     last = entries[-1]
     if t < 9 * 60 + 30 or t >= 15 * 60 + 5:
         # 盘前/收盘后: 最近条目非完整 → 补拉全天 (腾讯返回最近交易日完整数据)
         if not last.get('complete'):
-            d = fetch_tencent_day()
+            d = fetch_tencent_day(code)
             if d:
                 d['complete'] = True
                 upsert_tick_entry(entries, d)
-                save_tick_history(entries[-TICK_MAX_ENTRIES:])
+                return entries[-TICK_MAX_ENTRIES:]
     else:
         # 盘中: 今天条目缺失或陈旧 (10 分钟) → 补拉 partial (板子盘中重启兜底)
         cur = last if last['date'] == now.strftime('%Y%m%d') else None
         if cur is None or (not cur['complete'] and
                            time.time() - cur.get('fetched_at', 0) > TICK_PARTIAL_STALE_SEC):
-            d = fetch_tencent_day()
+            d = fetch_tencent_day(code)
             if d:
                 d['fetched_at'] = time.time()
                 upsert_tick_entry(entries, d)
-                save_tick_history(entries[-TICK_MAX_ENTRIES:])
+                return entries[-TICK_MAX_ENTRIES:]
+    return entries
 
 
-def build_tick_response():
-    """文本协议: 每行一天 D|YYYYMMDD|prev_close|HHMM price vol;... (升序, 旧在前)
+def tick_refresh_once():
+    """全部股票 (主 + 附加) 单轮分时更新决策, 落盘 tick_history.json"""
+    store = load_tick_history_all()
+    for code in TICK_CODES:
+        store[code] = tick_refresh_once_for(code, store.get(code, []))
+    save_tick_history_all(store)
+
+
+def build_tick_response(code):
+    """单只股票文本协议: 每行一天 D|YYYYMMDD|prev_close|HHMM price vol;... (升序, 旧在前)
     周一/新交易日修正: 交易日盘中且缓存无今天条目 → 只回最近 2 天
     (板子盘中本地采样今天后自然凑满 3 天, 避免显示 4 段)"""
-    entries = load_tick_history()
+    store = load_tick_history_all()
+    entries = store.get(code, [])
     if not entries:
         return ''
     now = now_cn()
@@ -755,6 +858,14 @@ def build_tick_response():
     return '\n'.join(lines) + '\n'
 
 
+def write_tick_files():
+    """主股票写 tick.txt (契约不变), 附加股票写 tick_<code>.txt (同文本协议)"""
+    for code in TICK_CODES:
+        text = build_tick_response(code)
+        path = 'tick.txt' if code == TICK_STOCK_CODE else 'tick_%s.txt' % code
+        atomic_write(path, text)
+
+
 # ============================================================
 # 主流程
 # ============================================================
@@ -766,14 +877,16 @@ def main():
     deepseek = fetch_deepseek(old.get('deepseek') or {})
     weather = fetch_weather(old.get('weather') or {})
     news = fetch_news(old.get('news') or '')
+    indices = fetch_indices(old)          # R6 国际指数
     kline = fetch_kline()
     mf = fetch_moneyflow()
     update_strategy(kline, mf)   # 写 state.json strat; message 由 pick_message 读取
     message = pick_message()
     reminders = today_reminders()
 
-    tick_refresh_once()
-    tick = build_tick_response()
+    tick_refresh_once()                   # R5 多股票: 主 + 附加
+    write_tick_files()
+    tick = build_tick_response(TICK_STOCK_CODE)
 
     data = {
         'deepseek': deepseek,
@@ -785,6 +898,7 @@ def main():
         'message': message,
         'reminders': reminders,
         'news': news,
+        'indices': indices,
     }
     atomic_write(DATA_FILE, json.dumps(data, ensure_ascii=False))
     atomic_write('tick.txt', tick)
@@ -792,9 +906,11 @@ def main():
     # 退出码: 无法产出任何有效内容才失败 (正常情况 weather 有模拟兜底, 恒为 0)
     has_any = (deepseek.get('balance') is not None or weather is not None
                or news or message or os.path.exists(DATA_FILE))
-    print('[sync] %s -> data.json (%.1fKB) tick.txt (%.1fKB)' % (
+    tick_names = ['tick.txt'] + ['tick_%s.txt' % c for c in EXTRA_TICK_CODES]
+    print('[sync] %s -> data.json (%.1fKB) %s (%.1fKB)' % (
         now.strftime('%F %T'), os.path.getsize(DATA_FILE) / 1024.0,
-        os.path.getsize('tick.txt') / 1024.0 if os.path.exists('tick.txt') else 0))
+        '+'.join(tick_names),
+        sum(os.path.getsize(p) for p in tick_names if os.path.exists(p)) / 1024.0))
     return 0 if has_any else 1
 
 
