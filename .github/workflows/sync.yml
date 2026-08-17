@@ -33,6 +33,7 @@ jobs:
         run: python3 sync.py
 
       - name: 提交并推送
+        id: commit
         if: success()
         run: |
           git config user.name 'board-data-sync'
@@ -40,16 +41,23 @@ jobs:
           # reminders.json 由 AstrBot 插件写入, 只读不写 (避免与插件 PUT 竞争)
           # tick_*.txt 为 R5 多股票分时 (主股票 tick.txt + 附加股票 tick_<code>.txt)
           git add data.json tick.txt tick_*.txt state.json tick_history.json
-          git commit -m "snapshot $(TZ=Asia/Shanghai date +%F_%H:%M)" || echo 'no change'
-          git push
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "no content change, skip purge"
+          else
+            git commit -m "snapshot $(TZ=Asia/Shanghai date +%F_%H:%M)"
+            git push
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: jsDelivr CDN 刷新
-        if: success()
+        if: success() && steps.commit.outputs.changed == 'true'
         continue-on-error: true   # purge 失败仅告警 (jsDelivr 分支缓存 ~24h, raw 兜底始终新鲜)
         run: |
           # R7: purge 偶发失败 (429 限流/网络抖动, exit 22) 导致 CDN 长期卡旧缓存,
           # 板子分时/数据一直拉旧版 → 加重试循环 (最多 3 次, 失败仅告警不断工作流)
-          # 板端另有 ?v= 小时戳 cache-buster 双保险 (见 config.h NEKO_API_TICK_BASE_1)
+          # 仅内容变化时才 purge (减少请求频率 → 降限流概率);
+          # 板端另有新鲜度校验兜底: 盘中数据不含今天交易日自动换 raw/ghproxy (见 data_manager.cpp)
           for i in 1 2 3; do
             curl -sf -X POST https://purge.jsdelivr.net \
               -H 'content-type: application/json' \
