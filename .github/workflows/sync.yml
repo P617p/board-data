@@ -56,6 +56,7 @@ jobs:
           # R8: 板子放单位后 GitHub 系 (jsDelivr/raw/ghproxy) 大概率被单位防火墙拦截,
           # 内网 192.168.71.82 跨网络不可达 → gitee 是国内站点, 单位放行概率最高
           # 每次运行都 force push (镜像只需数据最新, 不在乎历史; ~1s 成本)
+          git fetch --unshallow --quiet   # Actions 浅克隆不能 push 到 gitee (shallow update not allowed)
           git remote add gitee "https://P617p:${GITEE_TOKEN}@gitee.com/P617p/board-data.git"
           git push gitee HEAD:main --force
         env:
