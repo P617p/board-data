@@ -47,7 +47,15 @@ jobs:
         if: success()
         continue-on-error: true   # purge 失败仅告警 (jsDelivr 分支缓存 ~24h, raw 兜底始终新鲜)
         run: |
-          curl -sf -X POST https://purge.jsdelivr.net \
-            -H 'content-type: application/json' \
-            -d '{"path":["/gh/P617p/board-data@main/data.json","/gh/P617p/board-data@main/tick.txt",\
-                 "/gh/P617p/board-data@main/tick_sz000001.txt","/gh/P617p/board-data@main/tick_sh600519.txt"]}'
+          # R7: purge 偶发失败 (429 限流/网络抖动, exit 22) 导致 CDN 长期卡旧缓存,
+          # 板子分时/数据一直拉旧版 → 加重试循环 (最多 3 次, 失败仅告警不断工作流)
+          # 板端另有 ?v= 小时戳 cache-buster 双保险 (见 config.h NEKO_API_TICK_BASE_1)
+          for i in 1 2 3; do
+            curl -sf -X POST https://purge.jsdelivr.net \
+              -H 'content-type: application/json' \
+              -d '{"path":["/gh/P617p/board-data@main/data.json","/gh/P617p/board-data@main/tick.txt",\
+                   "/gh/P617p/board-data@main/tick_sz000001.txt","/gh/P617p/board-data@main/tick_sh600519.txt"]}' \
+              && break
+            echo "purge attempt $i failed, retrying..."
+            sleep 10
+          done
