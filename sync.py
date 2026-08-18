@@ -125,7 +125,7 @@ NEWS_FALLBACK_URL = 'https://feed.mix.sina.com.cn/api/roll/get?pageid=153&lid=25
 
 # 分时: 主股票与板子 config.h STOCK_LIST[0] 必须一致; 附加股票生成 tick_<code>.txt
 TICK_STOCK_CODE = 'sz003041'   # 主股票 (tick.txt 契约不变)
-EXTRA_TICK_CODES = ['sz000001', 'sh600519']   # 附加股票 (与板端 STOCK_LIST 占位一致)
+EXTRA_TICK_CODES = ['sz002426']   # 附加股票 (2026-08-18 板端列表精简: 真爱美家+胜利精密)
 TICK_CODES = [TICK_STOCK_CODE] + EXTRA_TICK_CODES
 TICK_TENCENT_URL_FMT = 'https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=%s'
 TICK_PARTIAL_STALE_SEC = 600    # 盘中 partial 超 10 分钟陈旧则补拉 (匹配 Actions 节奏)
