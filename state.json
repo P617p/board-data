@@ -1,1 +1,1 @@
-{"day_start_balance": 29.14, "date": "2026-08-21", "last_balance": 29.14, "strat": {"date": "2026-08-24", "fired": ["death", "macdd", "vol"], "count": 3, "key": "macdd", "text": "真爱美家 MACD死叉，注意回调", "ts": 1787561995}, "work_remind_ts": 1787551656}
+{"day_start_balance": 29.14, "date": "2026-08-21", "last_balance": 29.14, "strat": {"date": "2026-08-25", "fired": ["vol"], "count": 1, "key": "vol", "text": "真爱美家 放量异动！量比6.2", "ts": 1787623730}, "work_remind_ts": 1787551656}
