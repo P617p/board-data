@@ -1,1 +1,1 @@
-{"day_start_balance": 29.14, "date": "2026-08-21", "last_balance": 29.14, "strat": {"date": "2026-09-18", "fired": ["gold", "macdg", "vol"], "count": 3, "key": "macdg", "text": "真爱美家 MACD金叉！多方动能增强", "ts": 1789734068}, "work_remind_ts": 1787899829}
+{"day_start_balance": 29.14, "date": "2026-08-21", "last_balance": 29.14, "strat": {"date": "2026-09-21", "fired": ["bigchg"], "count": 1, "key": "bigchg", "text": "真爱美家 今日大涨 10.0%", "ts": 1789958103}, "work_remind_ts": 1787899829}
