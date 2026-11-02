@@ -1,1 +1,1 @@
-{"day_start_balance": 29.14, "date": "2026-08-21", "last_balance": 29.14, "strat": {"date": "2026-10-30", "fired": ["bigchg", "bolld"], "count": 2, "key": "bolld", "text": "真爱美家 跌破布林下轨，注意风险", "ts": 1793356125}, "work_remind_ts": 1793331829}
+{"day_start_balance": 29.14, "date": "2026-08-21", "last_balance": 29.14, "strat": {"date": "2026-11-02", "fired": ["vol"], "count": 1, "key": "vol", "text": "真爱美家 放量异动！量比5.3", "ts": 1793585768}, "work_remind_ts": 1793331829}
