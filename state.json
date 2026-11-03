@@ -1,1 +1,1 @@
-{"day_start_balance": 29.14, "date": "2026-08-21", "last_balance": 29.14, "strat": {"date": "2026-11-02", "fired": ["bigchg", "vol"], "count": 2, "key": "bigchg", "text": "真爱美家 今日大涨 6.4%", "ts": 1793619602}, "work_remind_ts": 1793331829}
+{"day_start_balance": 29.14, "date": "2026-08-21", "last_balance": 29.14, "strat": {"date": "2026-11-03", "fired": ["bigchg"], "count": 1, "key": "bigchg", "text": "真爱美家 今日大涨 6.4%", "ts": 1793677976}, "work_remind_ts": 1793331829}
