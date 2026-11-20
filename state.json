@@ -1,1 +1,1 @@
-{"day_start_balance": 29.14, "date": "2026-08-21", "last_balance": 29.14, "strat": {"date": "2026-11-20", "fired": ["vol"], "count": 1, "key": "vol", "text": "真爱美家 放量异动！量比3.9", "ts": 1795146912}, "work_remind_ts": 1794369355}
+{"day_start_balance": 29.14, "date": "2026-08-21", "last_balance": 29.14, "strat": {"date": "2026-11-20", "fired": ["bolld", "vol"], "count": 2, "key": "bolld", "text": "真爱美家 跌破布林下轨，注意风险", "ts": 1795182998}, "work_remind_ts": 1794369355}
